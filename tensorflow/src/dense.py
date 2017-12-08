@@ -12,7 +12,9 @@ from keras.regularizers import l2
 from keras.utils.layer_utils import convert_all_kernels_in_model
 from keras.utils.data_utils import get_file
 from keras.applications.imagenet_utils import _obtain_input_shape
+from keras.engine.topology import Layer
 import keras.backend as K
+from keras.backend import tf as ktf
 
 import numpy as np
 import tensorflow as tf
@@ -29,6 +31,28 @@ DENSENET_161_WEIGHTS_PATH_NO_TOP = r'https://github.com/titu1994/DenseNet/releas
 DENSENET_169_WEIGHTS_PATH_NO_TOP = r'https://github.com/titu1994/DenseNet/releases/download/v3.0/DenseNet-BC-169-32-no-top.h5'
 
 # Model construction
+                
+def Resize(Layer):
+    def __init__(self, output_dim, **kwargs):
+        self.output_dim = output_dim
+        super(MyLayer, self).__init__(**kwargs)
+
+    def build(self, input_shape):
+        # Create a trainable weight variable for this layer.
+        self.kernel = self.add_weight(name='kernel', 
+                                      shape=(input_shape[1], self.output_dim),
+                                      initializer='uniform',
+                                      trainable=True)
+        super(MyLayer, self).build(input_shape)  # Be sure to call this somewhere!
+
+    def call(self, im):
+        im_reshaped = K.reshape(im, (-1, im.get_shape()[1].value, im.get_shape()[2].value, 1))
+        r = ktf.image.resize_images(im_reshaped, (self.output_dim[0], self.output_dim[1]))
+        tile = K.tile(r, [1, 1, 1, self.output_dim[2]])
+        return tile
+
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], self.output_dim)
 
 def __create_dense_net(output_dim, img_input, cam_input, depth=40, nb_dense_block=3, growth_rate=12, nb_filter=-1,
                        nb_layers_per_block=-1, bottleneck=False, reduction=0.0, dropout_rate=None, weight_decay=1e-4,
@@ -93,11 +117,11 @@ def __create_dense_net(output_dim, img_input, cam_input, depth=40, nb_dense_bloc
             if np.any(block_idx == np.array(cam_placement)):
                 out = Lambda(lambda im : K.reshape(im, (-1, im.get_shape()[1].value,
                                                         im.get_shape()[2].value, 1)))(cam_input)
-                print float(x.get_shape()[1].value) / out.get_shape()[1].value
-                print float(x.get_shape()[2].value) / out.get_shape()[2].value
-                out = Lambda(lambda im : tf.image.resize_images(im, (x.get_shape()[1].value,
-                                                            x.get_shape()[2].value)))(out)
-                out = Lambda(lambda i : K.tile(i, [1, 1, 1, x.get_shape()[3].value]))(out)
+                # Must declare s and n beforehand, or else leads to errors
+                s = float(x.get_shape()[1].value) / cam_input.get_shape()[1].value
+                out = Lambda(lambda im : K.resize_images(im, s, s, 'channels_last'))(out)
+                n = int(x.get_shape()[3].value)
+                out = Lambda(lambda i : K.tile(i, [1, 1, 1, n]))(out)
                 x = multiply([x, out])
 
     # The last dense_block does not have a transition_block
@@ -106,6 +130,16 @@ def __create_dense_net(output_dim, img_input, cam_input, depth=40, nb_dense_bloc
 
     x = BatchNormalization(axis=concat_axis, epsilon=1.1e-5)(x)
     x = Activation('relu')(x)
+    
+    if np.any(nb_dense_block - 1 == np.array(cam_placement)):
+        out = Lambda(lambda im : K.reshape(im, (-1, im.get_shape()[1].value, im.get_shape()[2].value, 1)))(cam_input)
+        # Must declare s and n beforehand, or else leads to errors
+        s = float(x.get_shape()[1].value) / cam_input.get_shape()[1].value
+        out = Lambda(lambda im : K.resize_images(im, s, s, 'channels_last'))(out)
+        n = int(x.get_shape()[3].value)
+        out = Lambda(lambda i : K.tile(i, [1, 1, 1, n]))(out)
+        x = multiply([x, out])
+        
     x = GlobalAveragePooling2D()(x)
 
     x = Dense(1024)(x)
@@ -136,7 +170,7 @@ def DenseNet(input_shape=None, cam_input_shape=None, depth=40, nb_dense_block=3,
                                       min_size=8,
                                       data_format=K.image_data_format(),
                                       require_flatten=False)
-    cam_input_shape = (input_shape[0], input_shape[1])
+    cam_input_shape = (128,64, 1)#(input_shape[0], input_shape[1])
 
     if cam_placement is None:
         img_input = Input(shape=input_shape, name='input_im')
